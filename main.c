@@ -515,6 +515,7 @@ static void render(cairo_t *cr, Goose *g, int sw, int sh) {
 
 int main() {
     srand(time(NULL));
+    system("pgrep -x picom > /dev/null || picom -b");
 
     // ignora SIGCHLD pra não acumular processos zumbi dos sons
     signal(SIGCHLD, SIG_IGN);
