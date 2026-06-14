@@ -15,56 +15,85 @@
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
 
+// ─── miniaudio ───────────────────────────────────────────────────────────────
+#define MINIAUDIO_IMPLEMENTATION
+#include "./miniaudio/miniaudio.h"
+
+// headers embutidos dos sons
+#include "./embed/Sound_Effects_BITE_mp3.h"
+#include "./embed/Sound_Effects_MudSquith_mp3.h"
+#include "./embed/Sound_Effects_Honks_Honk1_mp3.h"
+#include "./embed/Sound_Effects_Honks_Honk2_mp3.h"
+#include "./embed/Sound_Effects_Honks_Honk3_mp3.h"
+#include "./embed/Sound_Effects_Honks_Honk4_mp3.h"
+
 // ─── som ─────────────────────────────────────────────────────────────────────
-static void play_sound(const char *path) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        // filho: toca o som e morre
-        // redireciona stdout/stderr pro nada pra não poluir o terminal
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
-        execl("/usr/bin/mpv", "mpv", "--no-terminal", "--volume=60", path, NULL);
-        _exit(1);
-    }
-    // pai não espera — continua o game loop
-    // SIGCHLD vai ser ignorado pra não acumular zumbis
+
+static ma_engine g_audio_engine;
+static int       g_audio_ready = 0;
+
+static void audio_init() {
+    if (ma_engine_init(NULL, &g_audio_engine) == MA_SUCCESS)
+        g_audio_ready = 1;
+    else
+        fprintf(stderr, "Aviso: falha ao inicializar miniaudio\n");
 }
 
-#define MAX_HONKS 32
-static char honk_paths[MAX_HONKS][512];
-static int  honk_count = 0;
-
-static void load_honks(const char *honks_dir) {
-    DIR *d = opendir(honks_dir);
-    if (!d) { fprintf(stderr, "Aviso: pasta de honks não encontrada: %s\n", honks_dir); return; }
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL && honk_count < MAX_HONKS) {
-        const char *name = entry->d_name;
-        size_t len = strlen(name);
-        if (len > 4 && strcasecmp(name + len - 4, ".mp3") == 0) {
-            snprintf(honk_paths[honk_count], sizeof(honk_paths[0]),
-                     "%s/%s", honks_dir, name);
-            honk_count++;
-        }
+static void play_sound_mem(const unsigned char *data, unsigned int size) {
+    if (!g_audio_ready) return;
+    // miniaudio pode tocar de memória via ma_decoder
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, 44100);
+    ma_decoder *dec = malloc(sizeof(ma_decoder));
+    if (!dec) return;
+    if (ma_decoder_init_memory(data, size, &cfg, dec) != MA_SUCCESS) {
+        free(dec);
+        return;
     }
-    closedir(d);
+    // toca assíncrono usando ma_engine_play_sound_ex não existe —
+    // usa sound com flag MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC
+    ma_sound *snd = malloc(sizeof(ma_sound));
+    if (!snd) { ma_decoder_uninit(dec); free(dec); return; }
+    ma_result r = ma_sound_init_from_data_source(&g_audio_engine, dec,
+        MA_SOUND_FLAG_ASYNC, NULL, snd);
+    if (r != MA_SUCCESS) {
+        free(snd); ma_decoder_uninit(dec); free(dec);
+        return;
+    }
+    ma_sound_set_volume(snd, 0.6f);
+    ma_sound_start(snd);
+    // nota: snd e dec vazam memória — aceitável pra sons curtos
+    // numa versão futura: pool de sons com cleanup
+}
+
+static void play_bite()     { play_sound_mem(Sound_Effects_BITE_mp3,      Sound_Effects_BITE_mp3_size); }
+static void play_mud()      { play_sound_mem(Sound_Effects_MudSquith_mp3,  Sound_Effects_MudSquith_mp3_size); }
+
+static double last_mud_sound = 0;
+
+typedef struct { const unsigned char *data; unsigned int size; } HonkEntry;
+static HonkEntry honk_entries[4];
+#define HONK_COUNT 4
+
+static void init_honks() {
+    honk_entries[0] = (HonkEntry){ Sound_Effects_Honks_Honk1_mp3, Sound_Effects_Honks_Honk1_mp3_size };
+    honk_entries[1] = (HonkEntry){ Sound_Effects_Honks_Honk2_mp3, Sound_Effects_Honks_Honk2_mp3_size };
+    honk_entries[2] = (HonkEntry){ Sound_Effects_Honks_Honk3_mp3, Sound_Effects_Honks_Honk3_mp3_size };
+    honk_entries[3] = (HonkEntry){ Sound_Effects_Honks_Honk4_mp3, Sound_Effects_Honks_Honk4_mp3_size };
 }
 
 static void play_honk() {
-    if (honk_count == 0) return;
-    play_sound(honk_paths[rand() % honk_count]);
+    int i = rand() % HONK_COUNT;
+    play_sound_mem(honk_entries[i].data, honk_entries[i].size);
 }
-
 
 
 typedef struct { float x, y; } Vec2;
 
-typedef enum { TASK_WANDER, TASK_NAB_MOUSE, TASK_TRACK_MUD, TASK_COLLECT_WINDOW } GooseTask;
+typedef enum { TASK_WANDER, TASK_NAB_MOUSE, TASK_TRACK_MUD } GooseTask;
 typedef enum { NAB_SEEKING, NAB_DRAGGING, NAB_DECELERATING } NabStage;
 typedef enum { MUD_RUNNING_OFF, MUD_WANDERING } MudStage;
-typedef enum { CW_WALKING_OFF, CW_WAITING, CW_DRAGGING } CWStage;
 
-#define MAX_FOOTMARKS 64
+#define MAX_FOOTMARKS 32
 typedef struct { Vec2 pos; double time; } FootMark;
 
 // ─── tempo ───────────────────────────────────────────────────────────────────
@@ -91,10 +120,6 @@ static float clampf(float v, float lo, float hi) { return v<lo?lo:v>hi?hi:v; }
 static float lerpf(float a, float b, float t) { return a+(b-a)*t; }
 
 // ─── goose ───────────────────────────────────────────────────────────────────
-
-#define SOUND_BITE    "./Assets/Sound/Effects/BITE.mp3"
-#define SOUND_MUD     "./Assets/Sound/Effects/MudSquith.mp3"
-#define SOUND_HONKS   "./Assets/Sound/Effects/Honks"
 
 typedef struct {
     Vec2  pos, vel, target;
@@ -126,14 +151,6 @@ typedef struct {
     double    mud_dir_change;
     FootMark  footmarks[MAX_FOOTMARKS];
     int       footmark_idx;
-
-    // collect window
-    CWStage cw_stage;
-    double  cw_wait_start;
-    double  cw_wait_dur;
-    long    cw_window_id;
-    Vec2    cw_window_offset;
-    int     cw_from_left;  // 1 = saiu pela esquerda, 0 = direita
 
     // som
     double next_honk_time;
@@ -239,8 +256,7 @@ static void goose_tick(Goose *g, double now, double dt) {
                 g->vel.y *= 0.88f;
             }
             if (now - g->wander_start > g->wander_dur) {
-                float r = randf(0, 1);
-                if (r < 0.35f)
+                if (randf(0,1) < 0.4f)
                     set_mud(g, now);
                 else
                     set_wander(g, now);
@@ -256,7 +272,7 @@ static void goose_tick(Goose *g, double now, double dt) {
             g->target.y = mouse.y + offset.y;
             if (vec2_dist(beak, mouse) < 15.0f) {
                 g->nab_stage  = NAB_DRAGGING;
-                play_sound(SOUND_BITE);
+                play_bite();
                 g->nab_drag_to = (Vec2){
                     randf(100, g->screen_w-100),
                     randf(100, g->screen_h-100)
@@ -289,7 +305,7 @@ static void goose_tick(Goose *g, double now, double dt) {
             int near_edge = g->pos.x < 30 || g->pos.x > g->screen_w-30 ||
                             g->pos.y < 30 || g->pos.y > g->screen_h-30;
             if (near_edge) {
-                play_sound(SOUND_MUD);
+                play_mud();
                 g->mud_stage = MUD_WANDERING;
                 g->target = (Vec2){ randf(80, g->screen_w-80), randf(80, g->screen_h-80) };
             }
@@ -311,12 +327,10 @@ physics:;
 
     int braking = (g->task == TASK_WANDER && g->pause_start < 0 && dist_to_target < 60.0f);
     int stopped  = (g->task == TASK_WANDER && g->pause_start > 0);
-    int dragging_back = (g->task == TASK_COLLECT_WINDOW && g->cw_stage == CW_DRAGGING);
 
     if (!stopped && !braking && dist_to_target > 20.0f) {
-        float sign = dragging_back ? -1.0f : 1.0f;
-        g->vel.x += sign * dir_norm.x * g->accel * dt;
-        g->vel.y += sign * dir_norm.y * g->accel * dt;
+        g->vel.x += dir_norm.x * g->accel * dt;
+        g->vel.y += dir_norm.y * g->accel * dt;
     }
 
     float spd = sqrtf(g->vel.x*g->vel.x + g->vel.y*g->vel.y);
@@ -328,14 +342,11 @@ physics:;
     g->pos.x += g->vel.x * dt;
     g->pos.y += g->vel.y * dt;
 
-    // não sai da tela (exceto quando tá indo pra borda buscar janela)
-    int walking_off = (g->task == TASK_COLLECT_WINDOW && g->cw_stage == CW_WALKING_OFF);
-    if (!walking_off) {
-        if (g->pos.x < 20)            { g->pos.x = 20;            g->vel.x = fabsf(g->vel.x); }
-        if (g->pos.x > g->screen_w-20){ g->pos.x = g->screen_w-20; g->vel.x = -fabsf(g->vel.x); }
-        if (g->pos.y < 20)            { g->pos.y = 20;            g->vel.y = fabsf(g->vel.y); }
-        if (g->pos.y > g->screen_h-20){ g->pos.y = g->screen_h-20; g->vel.y = -fabsf(g->vel.y); }
-    }
+    // não sai da tela
+    if (g->pos.x < 20)            { g->pos.x = 20;            g->vel.x = fabsf(g->vel.x); }
+    if (g->pos.x > g->screen_w-20){ g->pos.x = g->screen_w-20; g->vel.x = -fabsf(g->vel.x); }
+    if (g->pos.y < 20)            { g->pos.y = 20;            g->vel.y = fabsf(g->vel.y); }
+    if (g->pos.y > g->screen_h-20){ g->pos.y = g->screen_h-20; g->vel.y = -fabsf(g->vel.y); }
 
     // ── direção ──
     if (spd > 30.0f) {
@@ -374,6 +385,10 @@ physics:;
             if (g->task == TASK_TRACK_MUD && g->mud_stage == MUD_WANDERING) {
                 add_footmark(g, g->l_foot, now);
                 g->mud_step_count++;
+                if (g->mud_step_count % 5 == 0 && now - last_mud_sound > 0.4) {
+                    play_mud();
+                    last_mud_sound = now;
+                }
             }
         }
     }
@@ -388,6 +403,10 @@ physics:;
             if (g->task == TASK_TRACK_MUD && g->mud_stage == MUD_WANDERING) {
                 add_footmark(g, g->r_foot, now);
                 g->mud_step_count++;
+                if (g->mud_step_count % 5 == 0 && now - last_mud_sound > 0.4) {
+                    play_mud();
+                    last_mud_sound = now;
+                }
             }
         }
     }
@@ -430,8 +449,8 @@ static void render(cairo_t *cr, Goose *g, int sw, int sh) {
     double now = get_time();
     for (int i = 0; i < MAX_FOOTMARKS; i++) {
         double age = now - g->footmarks[i].time;
-        if (age < 0 || age > 60.0) continue;
-        float alpha = (float)clampf(1.0f - (float)(age / 60.0f), 0, 1);
+        if (age < 0 || age > 18.0) continue;
+        float alpha = (float)clampf(1.0f - (float)(age / 18.0), 0, 1);
         float radius = 3.0f * alpha;
         cairo_set_source_rgba(cr, 0.55, 0.27, 0.07, alpha);
         cairo_arc(cr, g->footmarks[i].pos.x, g->footmarks[i].pos.y, radius, 0, 2*3.14159);
@@ -516,11 +535,8 @@ static void render(cairo_t *cr, Goose *g, int sw, int sh) {
 int main() {
     srand(time(NULL));
     system("pgrep -x picom > /dev/null || picom -b");
-
-    // ignora SIGCHLD pra não acumular processos zumbi dos sons
-    signal(SIGCHLD, SIG_IGN);
-
-    load_honks(SOUND_HONKS);
+    audio_init();
+    init_honks();
 
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "Erro: sem display X11\n"); return 1; }
@@ -610,7 +626,7 @@ int main() {
         cairo_surface_flush(surface);
         XFlush(dpy);
 
-        usleep(8333);
+        usleep(16666); // ~60fps
     }
 
     cairo_destroy(cr);

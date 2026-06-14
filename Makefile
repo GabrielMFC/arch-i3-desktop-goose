@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -g
-LIBS = -lX11 -lXext -lcairo -lm -lpthread
+CFLAGS = -Wall -Wextra -g -I../miniaudio -I../embed
+LIBS = -lX11 -lXext -lcairo -lm -ldl
 
 TARGET = goose
 SRCS = main.c
