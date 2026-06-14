@@ -68,8 +68,6 @@ static void play_sound_mem(const unsigned char *data, unsigned int size) {
 static void play_bite()     { play_sound_mem(Sound_Effects_BITE_mp3,      Sound_Effects_BITE_mp3_size); }
 static void play_mud()      { play_sound_mem(Sound_Effects_MudSquith_mp3,  Sound_Effects_MudSquith_mp3_size); }
 
-static double last_mud_sound = 0;
-
 typedef struct { const unsigned char *data; unsigned int size; } HonkEntry;
 static HonkEntry honk_entries[4];
 #define HONK_COUNT 4
@@ -93,7 +91,7 @@ typedef enum { TASK_WANDER, TASK_NAB_MOUSE, TASK_TRACK_MUD } GooseTask;
 typedef enum { NAB_SEEKING, NAB_DRAGGING, NAB_DECELERATING } NabStage;
 typedef enum { MUD_RUNNING_OFF, MUD_WANDERING } MudStage;
 
-#define MAX_FOOTMARKS 32
+#define MAX_FOOTMARKS 64
 typedef struct { Vec2 pos; double time; } FootMark;
 
 // ─── tempo ───────────────────────────────────────────────────────────────────
@@ -385,10 +383,6 @@ physics:;
             if (g->task == TASK_TRACK_MUD && g->mud_stage == MUD_WANDERING) {
                 add_footmark(g, g->l_foot, now);
                 g->mud_step_count++;
-                if (g->mud_step_count % 5 == 0 && now - last_mud_sound > 0.4) {
-                    play_mud();
-                    last_mud_sound = now;
-                }
             }
         }
     }
@@ -403,10 +397,6 @@ physics:;
             if (g->task == TASK_TRACK_MUD && g->mud_stage == MUD_WANDERING) {
                 add_footmark(g, g->r_foot, now);
                 g->mud_step_count++;
-                if (g->mud_step_count % 5 == 0 && now - last_mud_sound > 0.4) {
-                    play_mud();
-                    last_mud_sound = now;
-                }
             }
         }
     }
@@ -449,8 +439,8 @@ static void render(cairo_t *cr, Goose *g, int sw, int sh) {
     double now = get_time();
     for (int i = 0; i < MAX_FOOTMARKS; i++) {
         double age = now - g->footmarks[i].time;
-        if (age < 0 || age > 18.0) continue;
-        float alpha = (float)clampf(1.0f - (float)(age / 18.0), 0, 1);
+        if (age < 0 || age > 60) continue;
+        float alpha = (float)clampf(1.0f - (float)(age / 60), 0, 1);
         float radius = 3.0f * alpha;
         cairo_set_source_rgba(cr, 0.55, 0.27, 0.07, alpha);
         cairo_arc(cr, g->footmarks[i].pos.x, g->footmarks[i].pos.y, radius, 0, 2*3.14159);
