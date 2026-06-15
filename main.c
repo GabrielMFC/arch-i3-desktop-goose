@@ -32,41 +32,88 @@
 static ma_engine g_audio_engine;
 static int       g_audio_ready = 0;
 
+// Pool de sons: evita alloc/leak a cada reprodução
+#define SOUND_POOL_SIZE 16
+
+typedef struct {
+    ma_sound   sound;
+    ma_decoder decoder;
+    int        in_use;
+} SoundSlot;
+
+static SoundSlot g_sound_pool[SOUND_POOL_SIZE];
+
 static void audio_init() {
-    if (ma_engine_init(NULL, &g_audio_engine) == MA_SUCCESS)
+    if (ma_engine_init(NULL, &g_audio_engine) == MA_SUCCESS) {
         g_audio_ready = 1;
-    else
+        memset(g_sound_pool, 0, sizeof(g_sound_pool));
+    } else {
         fprintf(stderr, "Aviso: falha ao inicializar miniaudio\n");
+    }
+}
+
+static void audio_cleanup() {
+    if (!g_audio_ready) return;
+    for (int i = 0; i < SOUND_POOL_SIZE; i++) {
+        if (g_sound_pool[i].in_use) {
+            ma_sound_uninit(&g_sound_pool[i].sound);
+            ma_decoder_uninit(&g_sound_pool[i].decoder);
+            g_sound_pool[i].in_use = 0;
+        }
+    }
+    ma_engine_uninit(&g_audio_engine);
+    g_audio_ready = 0;
+}
+
+// Libera slots cujo som já terminou
+static void audio_pool_gc() {
+    for (int i = 0; i < SOUND_POOL_SIZE; i++) {
+        if (g_sound_pool[i].in_use && ma_sound_at_end(&g_sound_pool[i].sound)) {
+            ma_sound_uninit(&g_sound_pool[i].sound);
+            ma_decoder_uninit(&g_sound_pool[i].decoder);
+            g_sound_pool[i].in_use = 0;
+        }
+    }
 }
 
 static void play_sound_mem(const unsigned char *data, unsigned int size) {
     if (!g_audio_ready) return;
-    // miniaudio pode tocar de memória via ma_decoder
+
+    // GC antes de procurar slot
+    audio_pool_gc();
+
+    // Encontra slot livre
+    SoundSlot *slot = NULL;
+    for (int i = 0; i < SOUND_POOL_SIZE; i++) {
+        if (!g_sound_pool[i].in_use) {
+            slot = &g_sound_pool[i];
+            break;
+        }
+    }
+    if (!slot) {
+        fprintf(stderr, "Aviso: pool de sons cheio, som descartado\n");
+        return;
+    }
+
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, 44100);
-    ma_decoder *dec = malloc(sizeof(ma_decoder));
-    if (!dec) return;
-    if (ma_decoder_init_memory(data, size, &cfg, dec) != MA_SUCCESS) {
-        free(dec);
+    if (ma_decoder_init_memory(data, size, &cfg, &slot->decoder) != MA_SUCCESS)
         return;
-    }
-    // toca assíncrono usando ma_engine_play_sound_ex não existe —
-    // usa sound com flag MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC
-    ma_sound *snd = malloc(sizeof(ma_sound));
-    if (!snd) { ma_decoder_uninit(dec); free(dec); return; }
-    ma_result r = ma_sound_init_from_data_source(&g_audio_engine, dec,
-        MA_SOUND_FLAG_ASYNC, NULL, snd);
+
+    ma_result r = ma_sound_init_from_data_source(
+        &g_audio_engine, &slot->decoder,
+        MA_SOUND_FLAG_ASYNC, NULL, &slot->sound);
     if (r != MA_SUCCESS) {
-        free(snd); ma_decoder_uninit(dec); free(dec);
+        ma_decoder_uninit(&slot->decoder);
         return;
     }
-    ma_sound_set_volume(snd, 0.6f);
-    ma_sound_start(snd);
-    // nota: snd e dec vazam memória — aceitável pra sons curtos
-    // numa versão futura: pool de sons com cleanup
+
+    slot->in_use = 1;
+    ma_sound_set_volume(&slot->sound, 0.6f);
+    ma_sound_start(&slot->sound);
 }
 
-static void play_bite()     { play_sound_mem(Sound_Effects_BITE_mp3,      Sound_Effects_BITE_mp3_size); }
-static void play_mud()      { play_sound_mem(Sound_Effects_MudSquith_mp3,  Sound_Effects_MudSquith_mp3_size); }
+static void play_bite() { play_sound_mem(Sound_Effects_BITE_mp3,     Sound_Effects_BITE_mp3_size); }
+static void play_mud()  { play_sound_mem(Sound_Effects_MudSquith_mp3, Sound_Effects_MudSquith_mp3_size); }
 
 typedef struct { const unsigned char *data; unsigned int size; } HonkEntry;
 static HonkEntry honk_entries[4];
@@ -545,7 +592,8 @@ int main() {
     attrs.override_redirect = True;
     attrs.background_pixel  = 0;
     attrs.border_pixel      = 0;
-    attrs.colormap = XCreateColormap(dpy, root, vinfo.visual, AllocNone);
+    Colormap cmap = XCreateColormap(dpy, root, vinfo.visual, AllocNone);
+    attrs.colormap = cmap;
     attrs.event_mask = KeyPressMask | ButtonPressMask | PointerMotionMask;
 
     Window win = XCreateWindow(
@@ -619,8 +667,10 @@ int main() {
         usleep(16666); // ~60fps
     }
 
+    audio_cleanup();          // uninit engine + pool inteiro
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
+    XFreeColormap(dpy, cmap); // libera colormap antes de fechar display
     XDestroyWindow(dpy, win);
     XCloseDisplay(dpy);
     return 0;
