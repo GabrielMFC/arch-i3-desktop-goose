@@ -301,8 +301,11 @@ static void goose_tick(Goose *g, double now, double dt) {
                 g->vel.y *= 0.88f;
             }
             if (now - g->wander_start > g->wander_dur) {
+                float r = randf(0,1);
                 if (randf(0,1) < 0.4f)
                     set_mud(g, now);
+                else if (r < 0.65f)
+                    set_nab(g, now);
                 else
                     set_wander(g, now);
             }
