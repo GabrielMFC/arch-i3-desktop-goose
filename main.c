@@ -302,9 +302,9 @@ static void goose_tick(Goose *g, double now, double dt) {
             }
             if (now - g->wander_start > g->wander_dur) {
                 float r = randf(0,1);
-                if (randf(0,1) < 0.4f)
+                if (r >= 0.50f)
                     set_mud(g, now);
-                else if (r < 0.65f)
+                else if (r < 0.50f)
                     set_nab(g, now);
                 else
                     set_wander(g, now);
@@ -322,8 +322,8 @@ static void goose_tick(Goose *g, double now, double dt) {
                 g->nab_stage  = NAB_DRAGGING;
                 play_bite();
                 g->nab_drag_to = (Vec2){
-                    randf(100, g->screen_w-100),
-                    randf(100, g->screen_h-100)
+                    randf(50, g->screen_w-50),
+                    randf(50, g->screen_h-50)
                 };
                 g->target = g->nab_drag_to;
             }
@@ -414,10 +414,12 @@ physics:;
     Vec2 rh = foot_home(g, 1);
 
     if (g->l_foot_t < 0 && g->r_foot_t < 0) {
-        if (vec2_dist(g->l_foot, lh) > 5.0f) {
+        float dl = vec2_dist(g->l_foot, lh);
+        float dr = vec2_dist(g->r_foot, rh);
+        if (dl > dr && dl > 5.0f) {
             g->l_foot_origin = g->l_foot;
             g->l_foot_t = 0.0f;
-        } else if (vec2_dist(g->r_foot, rh) > 5.0f) {
+        } else if (dr > 5.0f) {
             g->r_foot_origin = g->r_foot;
             g->r_foot_t = 0.0f;
         }
